@@ -1,4 +1,5 @@
 """Delays expressed as a sum of sinusoids."""
+
 import astropy.units as u
 import numpy as np
 from loguru import logger as log
@@ -52,6 +53,7 @@ class WaveX(DelayComponent):
                 name="WXEPOCH",
                 description="Reference epoch for Fourier representation of red noise",
                 time_scale="tdb",
+                tcb2tdb_scale_factor=u.Quantity(1),
             )
         )
         self.add_wavex_component(0.1, index=1, wxsin=0, wxcos=0, frozen=False)
@@ -107,6 +109,7 @@ class WaveX(DelayComponent):
                 units="1/d",
                 value=wxfreq,
                 parameter_type="float",
+                tcb2tdb_scale_factor=u.Quantity(1),
             )
         )
         self.add_param(
@@ -117,6 +120,7 @@ class WaveX(DelayComponent):
                 value=wxsin,
                 frozen=frozen,
                 parameter_type="float",
+                tcb2tdb_scale_factor=u.Quantity(1),
             )
         )
         self.add_param(
@@ -127,6 +131,7 @@ class WaveX(DelayComponent):
                 value=wxcos,
                 frozen=frozen,
                 parameter_type="float",
+                tcb2tdb_scale_factor=u.Quantity(1),
             )
         )
         self.setup()
@@ -218,6 +223,7 @@ class WaveX(DelayComponent):
                     units="1/d",
                     value=wxfreq,
                     parameter_type="float",
+                    tcb2tdb_scale_factor=u.Quantity(1),
                 )
             )
             self.add_param(
@@ -228,6 +234,7 @@ class WaveX(DelayComponent):
                     value=wxsin,
                     parameter_type="float",
                     frozen=frozen,
+                    tcb2tdb_scale_factor=u.Quantity(1),
                 )
             )
             self.add_param(
@@ -238,6 +245,7 @@ class WaveX(DelayComponent):
                     value=wxcos,
                     parameter_type="float",
                     frozen=frozen,
+                    tcb2tdb_scale_factor=u.Quantity(1),
                 )
             )
         self.setup()

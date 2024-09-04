@@ -43,6 +43,21 @@ from pathlib import Path
 from warnings import warn
 from scipy.optimize import minimize
 from numdifftools import Hessian
+from typing import (
+    Optional,
+    List,
+    Union,
+    Callable,
+    Any,
+    Tuple,
+    IO,
+    Dict,
+    Iterable,
+    Type,
+    Iterator,
+    Literal,
+)
+import uncertainties
 
 import astropy.constants as const
 import astropy.coordinates as coords
@@ -59,7 +74,7 @@ import warnings
 import pint
 import pint.pulsar_ecliptic
 from pint.toa_select import TOASelect
-
+from pint.types import file_like, quantity_like
 
 __all__ = [
     "PINTPrecisionError",
@@ -82,6 +97,7 @@ __all__ = [
     "sum_print",
     "dmx_ranges_old",
     "dmx_ranges",
+    "dmx_setup",
     "dmxselections",
     "xxxselections",
     "dmxstats",
@@ -113,6 +129,14 @@ __all__ = [
     "convert_dispersion_measure",
     "parse_time",
     "get_unit",
+    "normalize_designmatrix",
+    "akaike_information_criterion",
+    "bayesian_information_criterion",
+    "sherman_morrison_dot",
+    "woodbury_dot",
+    "plrednoise_from_wavex",
+    "pldmnoise_from_dmwavex",
+    "find_optimal_nharms",
 ]
 
 COLOR_NAMES = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"]
@@ -137,7 +161,7 @@ class PINTPrecisionError(RuntimeError):
 # A warning is emitted in pint.pulsar_mjd if sufficient precision is not available
 
 
-def check_longdouble_precision():
+def check_longdouble_precision() -> bool:
     """Check whether long doubles have adequate precision.
 
     Returns True if long doubles have enough precision to use PINT
@@ -146,7 +170,7 @@ def check_longdouble_precision():
     return np.finfo(np.longdouble).eps < 2e-19
 
 
-def require_longdouble_precision():
+def require_longdouble_precision() -> None:
     """Raise an exception if long doubles do not have enough precision.
 
     Raises RuntimeError if PINT cannot be run with high precision on this
@@ -182,7 +206,13 @@ class PosVel:
 
     """
 
-    def __init__(self, pos, vel, obj=None, origin=None):
+    def __init__(
+        self,
+        pos: Union[List, np.ndarray, u.Quantity],
+        vel: Union[List, np.ndarray, u.Quantity],
+        obj: Optional[str] = None,
+        origin: Optional[str] = None,
+    ) -> None:
         if len(pos) != 3:
             raise ValueError(f"Position vector has length {len(pos)} instead of 3")
         self.pos = pos if isinstance(pos, u.Quantity) else np.asarray(pos)
@@ -208,13 +238,13 @@ class PosVel:
         self.origin = origin
         # FIXME: what about dtype compatibility?
 
-    def _has_labels(self):
+    def _has_labels(self) -> bool:
         return (self.obj is not None) and (self.origin is not None)
 
-    def __neg__(self):
+    def __neg__(self) -> "PosVel":
         return PosVel(-self.pos, -self.vel, obj=self.origin, origin=self.obj)
 
-    def __add__(self, other):
+    def __add__(self, other: "PosVel") -> "PosVel":
         obj = None
         origin = None
         if self._has_labels() and other._has_labels():
@@ -235,17 +265,17 @@ class PosVel:
             self.pos + other.pos, self.vel + other.vel, obj=obj, origin=origin
         )
 
-    def __sub__(self, other):
+    def __sub__(self, other: "PosVel") -> "PosVel":
         return self.__add__(other.__neg__())
 
-    def __str__(self):
+    def __str__(self) -> str:
         return (
             f"PosVel({str(self.pos)}, {str(self.vel)} {self.origin}->{self.obj})"
             if self._has_labels()
             else f"PosVel({str(self.pos)}, {str(self.vel)})"
         )
 
-    def __getitem__(self, k):
+    def __getitem__(self, k: Union[int, Tuple]) -> "PosVel":
         """Allow extraction of slices of the contained arrays"""
         colon = slice(None, None, None)
         ix = (colon,) + k if isinstance(k, tuple) else (colon, k)
@@ -254,7 +284,9 @@ class PosVel:
         )
 
 
-def numeric_partial(f, args, ix=0, delta=1e-6):
+def numeric_partial(
+    f: Callable, args: Union[List, Tuple], ix: int = 0, delta: float = 1e-6
+) -> float:
     """Compute the partial derivative of f numerically.
 
     This uses symmetric differences to estimate the partial derivative
@@ -272,7 +304,9 @@ def numeric_partial(f, args, ix=0, delta=1e-6):
     return (r2 - r3) / delta
 
 
-def numeric_partials(f, args, delta=1e-6):
+def numeric_partials(
+    f: Callable, args: Union[List, Tuple], delta: float = 1e-6
+) -> float:
     """Compute all the partial derivatives of f numerically.
 
     Returns a matrix of the partial derivative of every return value
@@ -283,7 +317,13 @@ def numeric_partials(f, args, delta=1e-6):
     return np.array(r).T
 
 
-def check_all_partials(f, args, delta=1e-6, atol=1e-4, rtol=1e-4):
+def check_all_partials(
+    f: Callable,
+    args: Union[List, Tuple],
+    delta: float = 1e-6,
+    atol: float = 1e-4,
+    rtol: float = 1e-4,
+) -> None:
     """Check the partial derivatives of a function that returns derivatives.
 
     The function is assumed to return a pair (values, partials), where
@@ -306,7 +346,7 @@ def check_all_partials(f, args, delta=1e-6, atol=1e-4, rtol=1e-4):
         raise
 
 
-def has_astropy_unit(x):
+def has_astropy_unit(x: Any) -> bool:
     """Test whether x has a unit attribute containing an astropy unit.
 
     This is useful, because different data types can still have units
@@ -329,7 +369,7 @@ class PrefixError(ValueError):
     pass
 
 
-def split_prefixed_name(name):
+def split_prefixed_name(name: str) -> Tuple[str, str, int]:
     """Split a prefixed name.
 
     Parameters
@@ -376,7 +416,10 @@ def split_prefixed_name(name):
     return prefix_part, index_part, int(index_part)
 
 
-def taylor_horner(x, coeffs):
+def taylor_horner(
+    x: quantity_like,
+    coeffs: Union[List[u.Quantity], List[uncertainties.ufloat]],
+) -> quantity_like:
     """Evaluate a Taylor series of coefficients at x via the Horner scheme.
 
     For example, if we want: 10 + 3*x/1! + 4*x^2/2! + 12*x^3/3! with
@@ -403,7 +446,11 @@ def taylor_horner(x, coeffs):
     return taylor_horner_deriv(x, coeffs, deriv_order=0)
 
 
-def taylor_horner_deriv(x, coeffs, deriv_order=1):
+def taylor_horner_deriv(
+    x: quantity_like,
+    coeffs: Union[List[u.Quantity], List[uncertainties.ufloat]],
+    deriv_order: int = 1,
+) -> quantity_like:
     """Evaluate the nth derivative of a Taylor series.
 
     For example, if we want: first order of (10 + 3*x/1! + 4*x^2/2! + 12*x^3/3!)
@@ -445,7 +492,7 @@ def taylor_horner_deriv(x, coeffs, deriv_order=1):
 
 
 @contextmanager
-def open_or_use(f, mode="r"):
+def open_or_use(f: file_like, mode: Literal["r", "rb", "w", "wb"] = "r") -> Iterator:
     """Open a filename or use an open file.
 
     Specifically, if f is a string, try to use it as an argument to
@@ -460,7 +507,7 @@ def open_or_use(f, mode="r"):
         yield f
 
 
-def lines_of(f):
+def lines_of(f: Any) -> Iterator:
     """Iterate over the lines of a file, an open file, or an iterator.
 
     If ``f`` is a string, try to open a file of that name. Otherwise
@@ -473,7 +520,7 @@ def lines_of(f):
         yield from fo
 
 
-def interesting_lines(lines, comments=None):
+def interesting_lines(lines: Iterable, comments: Optional[str] = None) -> Iterator[str]:
     """Iterate over lines skipping whitespace and comments.
 
     Each line has its whitespace stripped and then it is checked whether
@@ -503,7 +550,7 @@ def interesting_lines(lines, comments=None):
         yield ln
 
 
-def pmtot(model):
+def pmtot(model: "pint.models.TimingModel") -> u.Quantity:
     """Compute and return the total proper motion from a model object
 
     Calculates total proper motion from the parameters of the model, in either
@@ -543,14 +590,14 @@ def pmtot(model):
 class dmxrange:
     """Internal class for building DMX ranges"""
 
-    def __init__(self, lofreqs, hifreqs):
+    def __init__(self, lofreqs: List[float], hifreqs: List[float]):
         """lofreqs and hifreqs are lists of MJDs that are in the low or high band respectively"""
         self.los = lofreqs
         self.his = hifreqs
         self.min = min(lofreqs + hifreqs) - 0.001 * u.d
         self.max = max(lofreqs + hifreqs) + 0.001 * u.d
 
-    def sum_print(self):
+    def sum_print(self) -> None:
         print(
             "{:8.2f}-{:8.2f} ({:8.2f}): NLO={:5d} NHI={:5d}".format(
                 self.min.value,
@@ -563,18 +610,19 @@ class dmxrange:
 
 
 def dmx_ranges_old(
-    toas,
-    divide_freq=1000.0 * u.MHz,
-    offset=0.01 * u.d,
-    max_diff=15.0 * u.d,
-    verbose=False,
-):
+    toas: "pint.toa.TOAs",
+    divide_freq: u.Quantity = 1000.0 * u.MHz,
+    offset: u.Quantity = 0.01 * u.d,
+    max_diff: u.Quantity = 15.0 * u.d,
+    verbose: bool = False,
+) -> Tuple[np.ndarray, "pint.models.Component"]:
     """Compute initial DMX ranges for a set of TOAs
 
     This is a rudimentary translation of $TEMPO/utils/dmx_ranges/DMX_ranges2.py
 
     Parameters
     ----------
+    toas : pint.toa.TOAs
     divide_freq : Quantity, MHz
         Requires TOAs above and below this freq for a good DMX range
     offset : Quantity, days
@@ -735,7 +783,12 @@ def dmx_ranges_old(
     return mask, dmx_comp
 
 
-def dmx_ranges(toas, divide_freq=1000.0 * u.MHz, binwidth=15.0 * u.d, verbose=False):
+def dmx_ranges(
+    toas: "pint.toa.TOAs",
+    divide_freq=1000.0 * u.MHz,
+    binwidth=15.0 * u.d,
+    verbose=False,
+) -> Tuple[np.ndarray, "pint.models.timing_model.Component"]:
     """Compute initial DMX ranges for a set of TOAs
 
     This is an alternative algorithm for computing DMX ranges
@@ -757,6 +810,7 @@ def dmx_ranges(toas, divide_freq=1000.0 * u.MHz, binwidth=15.0 * u.d, verbose=Fa
         Array with True for all TOAs that got assigned to a DMX bin
     component : TimingModel.Component object
         A DMX Component class with the DMX ranges included
+
     """
     import pint.models.parameter
     from pint.models.timing_model import Component
@@ -844,7 +898,90 @@ def dmx_ranges(toas, divide_freq=1000.0 * u.MHz, binwidth=15.0 * u.d, verbose=Fa
     return mask, dmx_comp
 
 
-def xxxselections(model, toas, prefix="DM"):
+def dmx_setup(
+    t: Union["pint.toa.TOAs", u.Quantity, Time],
+    minwidth: u.Quantity = 10 * u.d,
+    mintoas: int = 1,
+) -> Tuple[u.Quantity, u.Quantity, np.ndarray]:
+    """Set up DMX bins with a minimal binning strategy
+
+    The nominal binwidth will be >=`minwidth`, but will always include >=`mintoas` TOAs.
+    No dividing based on observing frequency is done.
+
+    Parameters
+    ----------
+    t : `pint.toa.TOAs` or astropy.units.Quantity or astropy.time.Time
+        Input TOAs to divide.  If Quantity, assume MJD
+    minwidth : astropy.units.Quantity
+        Minimum bin width
+    mintoas : int
+        Minimum number of TOAs in a bin
+
+    Returns
+    -------
+    R1 : astropy.units.Quantity
+        Start times of the bins
+    R2 : astropy.units.Quantity
+        Stop times of the bins
+    N : np.ndarray
+        Number of TOAs in each bin
+
+    Example
+    -------
+    To use the output of this function::
+
+        >>> R1, R2, N = dmx_setup(t)
+        >>> model.add_component(pint.models.dispersion_model.DispersionDMX())
+        >>> model.DMXR1_0001.value = R1[0].value
+        >>> model.DMXR2_0001.value = R2[0].value
+        >>> model.add_DMX_ranges(R1[1:].value, R2[1:].value, frozens=False)
+
+    Since the first DMX range already exists, we update those values before adding the other ranges.
+    """
+    if isinstance(t, Time):
+        MJDs = np.sort(t.mjd * u.d)
+    elif isinstance(t, u.Quantity):
+        MJDs = np.sort(t)
+    else:
+        # assume TOAs, although we don't want to check explicitly to avoid circular imports
+        MJDs = np.sort(t.get_mjds())
+    itoa = 0
+    idmx = 0
+    R1 = []
+    R2 = []
+    while itoa < len(MJDs) - 1:
+        if idmx == 0:
+            R1.append(MJDs[itoa])
+        else:
+            R1.append(R2[-1])
+        R2.append(R1[idmx] + minwidth)
+        itoa = np.where(MJDs <= R2[-1])[0].max()
+        while ((MJDs >= R1[idmx]) & (MJDs < R2[idmx])).sum() < mintoas:
+            itoa += 1
+            if itoa < len(MJDs):
+                R2[idmx] = MJDs[itoa] + 1 * u.d
+            else:
+                R2[idmx] = MJDs[itoa - 1] + 1 * u.d
+                break
+        idmx += 1
+    if (R2[-1] - R1[-1] < minwidth) or (
+        ((MJDs >= R1[-1]) & (MJDs < R2[-1])).sum() < mintoas
+    ):
+        # in case the last bin is too short
+        R2[-2] = R2[-1]
+        R1.pop()
+        R2.pop()
+    R1 = np.array([x.value for x in R1]) * u.d
+    R2 = np.array([x.value for x in R2]) * u.d
+    N = np.zeros(len(R1), dtype=int)
+    for idmx in range(len(R1)):
+        N[idmx] = ((MJDs >= R1[idmx]) & (MJDs < R2[idmx])).sum()
+    return R1, R2, N
+
+
+def xxxselections(
+    model: "pint.models.TimingModel", toas: "pint.toa.TOAs", prefix: str = "DM"
+) -> Dict[str, np.ndarray]:
     """Map DMX/SWX/other selections to TOAs
 
     Parameters
@@ -873,7 +1010,9 @@ def xxxselections(model, toas, prefix="DM"):
     return toas_selector.get_select_index(condition, toas["mjd_float"])
 
 
-def dmxselections(model, toas):
+def dmxselections(
+    model: "pint.models.TimingModel", toas: "pint.toa.TOAs"
+) -> Dict[str, np.ndarray]:
     """Map DMX selections to TOAs
 
     Parameters
@@ -898,7 +1037,9 @@ def dmxselections(model, toas):
     return toas_selector.get_select_index(condition, toas["mjd_float"])
 
 
-def dmxstats(model, toas, file=sys.stdout):
+def dmxstats(
+    model: "pint.models.TimingModel", toas: "pint.toa.TOAs", file: IO = sys.stdout
+) -> None:
     """Print DMX statistics
 
     Based off dmxparse by P. Demorest (https://github.com/nanograv/tempo/tree/master/util/dmxparse)
@@ -939,7 +1080,9 @@ def dmxstats(model, toas, file=sys.stdout):
         print(f"{(1-selected).sum()} TOAs not selected in any DMX window", file=file)
 
 
-def dmxparse(fitter, save=False):
+def dmxparse(
+    fitter: "pint.fitter.Fitter", save: bool = False
+) -> Dict[str, Union[u.Quantity, List]]:
     """Run dmxparse in python using PINT objects and results.
 
     Based off dmxparse by P. Demorest (https://github.com/nanograv/tempo/tree/master/util/dmxparse)
@@ -1078,7 +1221,9 @@ def dmxparse(fitter, save=False):
     }
 
 
-def get_prefix_timerange(model, prefixname):
+def get_prefix_timerange(
+    model: "pint.models.TimingModel", prefixname: str
+) -> Tuple[Time, ...]:
     """Get time range for a prefix quantity like DMX or SWX
 
     Parameters
@@ -1106,7 +1251,9 @@ def get_prefix_timerange(model, prefixname):
     return getattr(model, r1).quantity, getattr(model, r2).quantity
 
 
-def get_prefix_timeranges(model, prefixname):
+def get_prefix_timeranges(
+    model: "pint.models.TimingModel", prefixname: str
+) -> Tuple[np.ndarray, Time, Time]:
     """Get all time ranges and indices for a prefix quantity like DMX or SWX
 
     Parameters
@@ -1143,7 +1290,9 @@ def get_prefix_timeranges(model, prefixname):
     )
 
 
-def find_prefix_bytime(model, prefixname, t):
+def find_prefix_bytime(
+    model: "pint.models.TimingModel", prefixname: str, t: Union[float, Time, u.Quantity]
+) -> Union[int, np.ndarray]:
     """Identify matching index(es) for a prefix parameter like DMX
 
     Parameters
@@ -1168,7 +1317,13 @@ def find_prefix_bytime(model, prefixname, t):
     return indices[matches]
 
 
-def merge_dmx(model, index1, index2, value="mean", frozen=True):
+def merge_dmx(
+    model: "pint.models.TimingModel",
+    index1: int,
+    index2: int,
+    value: Literal["first", "second", "mean"] = "mean",
+    frozen: bool = True,
+) -> int:
     """Merge two DMX bins
 
     Parameters
@@ -1211,7 +1366,7 @@ def merge_dmx(model, index1, index2, value="mean", frozen=True):
     return newindex
 
 
-def split_dmx(model, time):
+def split_dmx(model: "pint.models.TimingModel", time: Time) -> Tuple[int, int]:
     """
     Split an existing DMX bin at the desired time
 
@@ -1245,7 +1400,6 @@ def split_dmx(model, time):
     index = int(dmx_epochs[ii])
     t1 = DMX_R1[ii]
     t2 = DMX_R2[ii]
-    print(f"{ii} {t1} {t2} {time}")
     getattr(model, f"DMXR2_{index:04d}").value = time.mjd
     newindex = model.add_DMX_range(
         time.mjd,
@@ -1256,7 +1410,7 @@ def split_dmx(model, time):
     return index, newindex
 
 
-def split_swx(model, time):
+def split_swx(model: "pint.models.TimingModel", time: Time) -> Tuple[int, int]:
     """
     Split an existing SWX bin at the desired time
 
@@ -1274,7 +1428,7 @@ def split_swx(model, time):
 
     """
     try:
-        SWX_mapping = model.get_prefix_mapping("SWX_")
+        SWX_mapping = model.get_prefix_mapping("SWXDM_")
     except ValueError:
         raise RuntimeError("No SWX values in model!")
     swx_epochs = [f"{x:04d}" for x in SWX_mapping.keys()]
@@ -1290,18 +1444,23 @@ def split_swx(model, time):
     index = int(swx_epochs[ii])
     t1 = SWX_R1[ii]
     t2 = SWX_R2[ii]
-    print(f"{ii} {t1} {t2} {time}")
     getattr(model, f"SWXR2_{index:04d}").value = time.mjd
     newindex = model.add_swx_range(
         time.mjd,
         t2,
-        swx=getattr(model, f"SWX_{index:04d}").quantity,
-        frozen=getattr(model, f"SWX_{index:04d}").frozen,
+        swxdm=getattr(model, f"SWXDM_{index:04d}").quantity,
+        frozen=getattr(model, f"SWXDM_{index:04d}").frozen,
     )
     return index, newindex
 
 
-def wavex_setup(model, T_span, freqs=None, n_freqs=None, freeze_params=False):
+def wavex_setup(
+    model: "pint.models.TimingModel",
+    T_span: Union[float, u.Quantity],
+    freqs: Optional[Iterable[Union[float, u.Quantity]]] = None,
+    n_freqs: Optional[int] = None,
+    freeze_params: bool = False,
+) -> List[int]:
     """
     Set-up a WaveX model based on either an array of user-provided frequencies or the wave number
     frequency calculation. Sine and Cosine amplitudes are initially set to zero
@@ -1314,15 +1473,17 @@ def wavex_setup(model, T_span, freqs=None, n_freqs=None, freeze_params=False):
     ----------
 
     model : pint.models.timing_model.TimingModel
+    T_span : float, astropy.quantity.Quantity
+        Time span used to calculate nyquist frequency when using freqs
+        Time span used to calculate WaveX frequencies when using n_freqs
+        Usually to be set as the length of the timing baseline the model is being used for
     freqs : iterable of float or astropy.quantity.Quantity, None
         User inputed base frequencies
     n_freqs : int, None
         Number of wave frequencies to calculate using the equation: freq_n = 2 * pi * n / T_span
         Where n is the wave number, and T_span is the total time span of the toas in the fitter object
-    T_span : float, astropy.quantity.Quantity
-        Time span used to calculate nyquist frequency when using freqs
-        Time span used to calculate WaveX frequencies when using n_freqs
-        Usually to be set as the length of the timing baseline the model is being used for
+    freeze_params : bool, optional
+        Whether the new parameters should be frozen
 
     Returns
     -------
@@ -1387,7 +1548,13 @@ def wavex_setup(model, T_span, freqs=None, n_freqs=None, freeze_params=False):
     return model.components["WaveX"].get_indices()
 
 
-def dmwavex_setup(model, T_span, freqs=None, n_freqs=None, freeze_params=False):
+def dmwavex_setup(
+    model: "pint.models.TimingModel",
+    T_span: Union[float, u.Quantity],
+    freqs: Optional[Iterable[Union[float, u.Quantity]]] = None,
+    n_freqs: Optional[int] = None,
+    freeze_params: bool = False,
+) -> List[int]:
     """
     Set-up a DMWaveX model based on either an array of user-provided frequencies or the wave number
     frequency calculation. Sine and Cosine amplitudes are initially set to zero
@@ -1400,15 +1567,17 @@ def dmwavex_setup(model, T_span, freqs=None, n_freqs=None, freeze_params=False):
     ----------
 
     model : pint.models.timing_model.TimingModel
+    T_span : float, astropy.quantity.Quantity
+        Time span used to calculate nyquist frequency when using freqs
+        Time span used to calculate DMWaveX frequencies when using n_freqs
+        Usually to be set as the length of the timing baseline the model is being used for
     freqs : iterable of float or astropy.quantity.Quantity, None
         User inputed base frequencies
     n_freqs : int, None
         Number of wave frequencies to calculate using the equation: freq_n = 2 * pi * n / T_span
         Where n is the wave number, and T_span is the total time span of the toas in the fitter object
-    T_span : float, astropy.quantity.Quantity
-        Time span used to calculate nyquist frequency when using freqs
-        Time span used to calculate WaveX frequencies when using n_freqs
-        Usually to be set as the length of the timing baseline the model is being used for
+    freeze_params : bool, optional
+        Whether the new parameters should be frozen
 
     Returns
     -------
@@ -1473,13 +1642,106 @@ def dmwavex_setup(model, T_span, freqs=None, n_freqs=None, freeze_params=False):
     return model.components["DMWaveX"].get_indices()
 
 
-def _translate_wave_freqs(om, k):
+def cmwavex_setup(
+    model: "pint.models.TimingModel",
+    T_span: Union[float, u.Quantity],
+    freqs: Optional[Iterable[Union[float, u.Quantity]]] = None,
+    n_freqs: Optional[int] = None,
+    freeze_params: bool = False,
+) -> List[int]:
+    """
+    Set-up a CMWaveX model based on either an array of user-provided frequencies or the wave number
+    frequency calculation. Sine and Cosine amplitudes are initially set to zero
+
+    User specifies T_span and either freqs or n_freqs. This function assumes that the timing model does not already
+    have any CMWaveX components. See add_cmwavex_component() or add_cmwavex_components() to add components
+    to an existing CMWaveX model.
+
+    Parameters
+    ----------
+
+    model : pint.models.timing_model.TimingModel
+    T_span : float, astropy.quantity.Quantity
+        Time span used to calculate nyquist frequency when using freqs
+        Time span used to calculate CMWaveX frequencies when using n_freqs
+        Usually to be set as the length of the timing baseline the model is being used for
+    freqs : iterable of float or astropy.quantity.Quantity, None
+        User inputed base frequencies
+    n_freqs : int, None
+        Number of wave frequencies to calculate using the equation: freq_n = 2 * pi * n / T_span
+        Where n is the wave number, and T_span is the total time span of the toas in the fitter object
+    freeze_params : bool, optional
+        Whether the new parameters should be frozen
+
+    Returns
+    -------
+
+    indices : list
+            Indices that have been assigned to new WaveX components
+    """
+    from pint.models.cmwavex import CMWaveX
+
+    if (freqs is None) and (n_freqs is None):
+        raise ValueError(
+            "CMWaveX component base frequencies are not specified. "
+            "Please input either freqs or n_freqs"
+        )
+
+    if (freqs is not None) and (n_freqs is not None):
+        raise ValueError(
+            "Both freqs and n_freqs are specified. Only one or the other should be used"
+        )
+
+    if n_freqs is not None and n_freqs <= 0:
+        raise ValueError("Must use a non-zero number of wave frequencies")
+
+    model.add_component(CMWaveX())
+    if isinstance(T_span, u.quantity.Quantity):
+        T_span.to(u.d)
+    else:
+        T_span *= u.d
+
+    nyqist_freq = 1.0 / (2.0 * T_span)
+    if freqs is not None:
+        if isinstance(freqs, u.quantity.Quantity):
+            freqs.to(u.d**-1)
+        else:
+            freqs *= u.d**-1
+        if len(freqs) == 1:
+            model.CMWXFREQ_0001.quantity = freqs
+        else:
+            freqs = np.array(freqs)
+            freqs.sort()
+            if min(np.diff(freqs)) < nyqist_freq:
+                warnings.warn(
+                    "CMWaveX frequency spacing is finer than frequency resolution of data"
+                )
+            model.CMWXFREQ_0001.quantity = freqs[0]
+            model.components["CMWaveX"].add_cmwavex_components(freqs[1:])
+
+    if n_freqs is not None:
+        if n_freqs == 1:
+            wave_freq = 1 / T_span
+            model.CMWXFREQ_0001.quantity = wave_freq
+        else:
+            wave_numbers = np.arange(1, n_freqs + 1)
+            wave_freqs = wave_numbers / T_span
+            model.CMWXFREQ_0001.quantity = wave_freqs[0]
+            model.components["CMWaveX"].add_cmwavex_components(wave_freqs[1:])
+
+    for p in model.params:
+        if p.startswith("CMWXSIN") or p.startswith("CMWXCOS"):
+            model[p].frozen = freeze_params
+
+    return model.components["CMWaveX"].get_indices()
+
+
+def _translate_wave_freqs(om: Union[float, u.Quantity], k: int) -> u.Quantity:
     """
     Use Wave model WAVEOM parameter to calculate a WaveX WXFREQ_ frequency parameter for wave number k
 
     Parameters
     ----------
-
     om : float or astropy.quantity.Quantity
         Base frequency of Wave model solution - parameter WAVEOM
         If float is given default units of 1/d assigned
@@ -1488,8 +1750,8 @@ def _translate_wave_freqs(om, k):
 
     Returns
     -------
-
-    WXFREQ_ quantity in units 1/d that can be used in WaveX model
+    astropy.units.Quantity
+        WXFREQ_ quantity in units 1/d that can be used in WaveX model
     """
     if isinstance(om, u.quantity.Quantity):
         om.to(u.d**-1)
@@ -1498,13 +1760,12 @@ def _translate_wave_freqs(om, k):
     return (om * (k + 1)) / (2.0 * np.pi)
 
 
-def _translate_wavex_freqs(wxfreq, k):
+def _translate_wavex_freqs(wxfreq: Union[float, u.Quantity], k: int) -> u.Quantity:
     """
     Use WaveX model WXFREQ_ parameters and wave number k to calculate the Wave model WAVEOM frequency parameter.
 
     Parameters
     ----------
-
     wxfreq : float or astropy.quantity.Quantity
         WaveX frequency from which the WAVEOM parameter will be calculated
         If float is given default units of 1/d assigned
@@ -1513,8 +1774,8 @@ def _translate_wavex_freqs(wxfreq, k):
 
     Returns
     -------
-
-    WAVEOM quantity in units 1/d that can be used in Wave model
+    astropy.units.Quantity
+        WAVEOM quantity in units 1/d that can be used in Wave model
     """
     if isinstance(wxfreq, u.quantity.Quantity):
         wxfreq.to(u.d**-1)
@@ -1530,7 +1791,9 @@ def _translate_wavex_freqs(wxfreq, k):
     )
 
 
-def translate_wave_to_wavex(model):
+def translate_wave_to_wavex(
+    model: "pint.models.TimingModel",
+) -> "pint.models.TimingModel":
     """
     Go from a Wave model to a WaveX model
 
@@ -1546,7 +1809,8 @@ def translate_wave_to_wavex(model):
 
     Returns
     -------
-    New timing model with converted WaveX model included
+    pint.models.timing_model.TimingModel
+        New timing model with converted WaveX model included
     """
     from pint.models.wavex import WaveX
 
@@ -1574,7 +1838,11 @@ def translate_wave_to_wavex(model):
     return new_model
 
 
-def get_wavex_freqs(model, index=None, quantity=False):
+def get_wavex_freqs(
+    model: "pint.models.TimingModel",
+    index: Optional[Union[float, int, List, np.ndarray]] = None,
+    quantity: bool = False,
+) -> List[Union[float, u.Quantity]]:
     """
     Return the WaveX frequencies for a timing model.
 
@@ -1620,7 +1888,11 @@ def get_wavex_freqs(model, index=None, quantity=False):
     return values
 
 
-def get_wavex_amps(model, index=None, quantity=False):
+def get_wavex_amps(
+    model: "pint.models.TimingModel",
+    index: Optional[Union[float, int, List, np.ndarray]] = None,
+    quantity: bool = False,
+) -> List[Union[float, u.Quantity]]:
     """
     Return the WaveX amplitudes for a timing model.
 
@@ -1682,7 +1954,9 @@ def get_wavex_amps(model, index=None, quantity=False):
     return values
 
 
-def translate_wavex_to_wave(model):
+def translate_wavex_to_wave(
+    model: "pint.models.TimingModel",
+) -> "pint.models.TimingModel":
     """
     Go from a WaveX timing model to a Wave timing model.
     WARNING: Not every WaveX model can be appropriately translated into a Wave model. This is dependent on the user's choice of frequencies in the WaveX model.
@@ -1696,7 +1970,8 @@ def translate_wavex_to_wave(model):
 
     Returns
     -------
-    New timing model with converted Wave model included
+    pint.models.timing_model.TimingModel
+        New timing model with converted Wave model included
     """
     from pint.models.wave import Wave
 
@@ -1724,7 +1999,13 @@ def translate_wavex_to_wave(model):
     return new_model
 
 
-def weighted_mean(arrin, weights_in, inputmean=None, calcerr=False, sdev=False):
+def weighted_mean(
+    arrin: np.ndarray,
+    weights_in: np.ndarray,
+    inputmean: Optional[float] = None,
+    calcerr: bool = False,
+    sdev: bool = False,
+) -> Tuple[float, ...]:
     """Compute weighted mean of input values
 
     Calculate the weighted mean, error, and optionally standard deviation of
@@ -1735,10 +2016,10 @@ def weighted_mean(arrin, weights_in, inputmean=None, calcerr=False, sdev=False):
     Parameters
     ----------
     arrin : array
-    Array containing the numbers whose weighted mean is desired.
+        Array containing the numbers whose weighted mean is desired.
     weights: array
-    A set of weights for each element in array. For measurements with
-    uncertainties, these should be 1/sigma^2.
+        A set of weights for each element in array. For measurements with
+        uncertainties, these should be 1/sigma^2.
     inputmean: float, optional
         An input mean value, around which the mean is calculated.
     calcerr : bool, optional
@@ -1752,8 +2033,8 @@ def weighted_mean(arrin, weights_in, inputmean=None, calcerr=False, sdev=False):
     Returns
     -------
     wmean, werr: tuple
-    A tuple of the weighted mean and error. If sdev=True the
-    tuple will also contain sdev: wmean,werr,wsdev
+        A tuple of the weighted mean and error. If sdev=True the
+        tuple will also contain sdev: wmean,werr,wsdev
 
     Notes
     -----
@@ -1789,8 +2070,8 @@ def ELL1_check(
 
     Checks whether the assumptions that allow ELL1 to be safely used are
     satisfied. To work properly, we should have:
-    :math:`asini/c  e^4 \ll {\\rm timing precision} / \sqrt N_{\\rm TOA}`
-    or :math:`A1 E^4 \ll TRES / \sqrt N_{\\rm TOA}`
+    :math:`asini/c  e^4 \\ll {\\rm timing precision} / \\sqrt N_{\\rm TOA}`
+    or :math:`A1 E^4 \\ll TRES / \\sqrt N_{\\rm TOA}`
 
     since the ELL1 model now includes terms up to O(E^3)
 
@@ -1839,7 +2120,7 @@ def ELL1_check(
         return False
 
 
-def FTest(chi2_1, dof_1, chi2_2, dof_2):
+def FTest(chi2_1: float, dof_1: int, chi2_2: float, dof_2: int) -> float:
     """Run F-test.
 
     Compute an F-test to see if a model with extra parameters is
@@ -1887,7 +2168,9 @@ def FTest(chi2_1, dof_1, chi2_2, dof_2):
         return 1.0
 
 
-def add_dummy_distance(c, distance=1 * u.kpc):
+def add_dummy_distance(
+    c: coords.SkyCoord, distance: u.Quantity = 1 * u.kpc
+) -> coords.SkyCoord:
     """Adds a dummy distance to a SkyCoord object for applying proper motion
 
     Parameters
@@ -1902,6 +2185,8 @@ def add_dummy_distance(c, distance=1 * u.kpc):
     cnew : astropy.coordinates.SkyCoord
         new SkyCoord object with a distance attached
     """
+    # import here to avoid circular imports
+    import pint.pulsar_ecliptic
 
     if c.frame.data.differentials == {}:
         log.warning(
@@ -1959,7 +2244,7 @@ def add_dummy_distance(c, distance=1 * u.kpc):
         return c
 
 
-def remove_dummy_distance(c):
+def remove_dummy_distance(c: coords.SkyCoord) -> coords.SkyCoord:
     """Removes a dummy distance from a SkyCoord object after applying proper motion
 
     Parameters
@@ -1972,6 +2257,8 @@ def remove_dummy_distance(c):
     cnew : astropy.coordinates.SkyCoord
         new SkyCoord object with a distance removed
     """
+    # import here to avoid circular imports
+    import pint.pulsar_ecliptic
 
     if c.frame.data.differentials == {}:
         log.warning(
@@ -2024,7 +2311,9 @@ def remove_dummy_distance(c):
         return c
 
 
-def info_string(prefix_string="# ", comment=None, detailed=False):
+def info_string(
+    prefix_string: str = "# ", comment: Optional[str] = None, detailed: bool = False
+) -> str:
     """Returns an informative string about the current state of PINT.
 
     Adds:
@@ -2200,12 +2489,12 @@ def info_string(prefix_string="# ", comment=None, detailed=False):
         else:
             s += f"{os.linesep}Comment: {comment}"
 
-    if (prefix_string is not None) and (len(prefix_string) > 0):
+    if prefix_string is not None and prefix_string != "":
         s = os.linesep.join([prefix_string + x for x in s.splitlines()])
     return s
 
 
-def list_parameters(class_=None):
+def list_parameters(class_: Optional[Type] = None) -> List[Dict[str, Union[str, List]]]:
     """List parameters understood by PINT.
 
     Parameters
@@ -2284,7 +2573,12 @@ def list_parameters(class_=None):
         return sorted(results.values(), key=lambda d: d["name"])
 
 
-def colorize(text, fg_color=None, bg_color=None, attribute=None):
+def colorize(
+    text: str,
+    fg_color: Optional[str] = None,
+    bg_color: Optional[str] = None,
+    attribute: Optional[str] = None,
+) -> str:
     """Colorizes a string (including unicode strings) for printing on the terminal
 
     For an example of usage, as well as a demonstration as to what the
@@ -2320,7 +2614,7 @@ def colorize(text, fg_color=None, bg_color=None, attribute=None):
     return COLOR_FORMAT % (att, bg, fg, text)
 
 
-def print_color_examples():
+def print_color_examples() -> None:
     """Print example terminal colors and attributes for/using :func:`~pint.utils.colorize`"""
     for att in TEXT_ATTRIBUTES:
         for fg in COLOR_NAMES:
@@ -2332,7 +2626,7 @@ def print_color_examples():
             print("")
 
 
-def group_iterator(items):
+def group_iterator(items: np.ndarray) -> Iterator[Tuple]:
     """An iterator to step over identical items in a :class:`numpy.ndarray`
 
     Example
@@ -2349,7 +2643,7 @@ def group_iterator(items):
         yield item, np.where(items == item)[0]
 
 
-def compute_hash(filename):
+def compute_hash(filename: file_like) -> bytes:
     """Compute a unique hash of a file.
 
     This is designed to keep around to detect changes, not to be
@@ -2378,7 +2672,12 @@ def compute_hash(filename):
     return h.digest()
 
 
-def get_conjunction(coord, t0, precision="low", ecl="IERS2010"):
+def get_conjunction(
+    coord: coords.SkyCoord,
+    t0: Time,
+    precision: Literal["low", "high"] = "low",
+    ecl: str = "IERS2010",
+) -> Time:
     """
     Find first time of Solar conjuction after t0 and approximate elongation at conjunction
 
@@ -2401,6 +2700,8 @@ def get_conjunction(coord, t0, precision="low", ecl="IERS2010"):
     astropy.units.Quantity
         Elongation at conjunction
     """
+    # import here to avoid circular import
+    import pint.pulsar_ecliptic
 
     assert precision.lower() in ["low", "high"]
     coord = coord.transform_to(pint.pulsar_ecliptic.PulsarEcliptic(ecl=ecl))
@@ -2445,7 +2746,7 @@ def get_conjunction(coord, t0, precision="low", ecl="IERS2010"):
     return conjunction, csun.separation(coord)
 
 
-def divide_times(t, t0, offset=0.5):
+def divide_times(t: Time, t0: Time, offset: float = 0.5) -> np.ndarray:
     """
     Divide input times into years relative to t0
 
@@ -2482,22 +2783,24 @@ def divide_times(t, t0, offset=0.5):
     return np.digitize(values, np.unique(values), right=True)
 
 
-def convert_dispersion_measure(dm, dmconst=None):
+def convert_dispersion_measure(
+    dm: u.Quantity, dmconst: Optional[u.Quantity] = None
+) -> u.Quantity:
     """Convert dispersion measure to a different value of the DM constant.
 
     Parameters
     ----------
     dm : astropy.units.Quantity
         DM measured according to the conventional value of the DM constant
+    dmconst : astropy.units.Quantity
+        Value of the DM constant. Default value is computed from CODATA physical
+        constants.
 
     Returns
     -------
     dm : astropy.units.Quantity
         DM measured according to the value of the DM constant computed from the
         latest values of the physical constants
-    dmconst : astropy.units.Quantity
-        Value of the DM constant. Default value is computed from CODATA physical
-        constants.
     Notes
     -----
     See https://nanograv-pint.readthedocs.io/en/latest/explanation.html#dispersion-measure
@@ -2513,7 +2816,11 @@ def convert_dispersion_measure(dm, dmconst=None):
     return (dm * pint.DMconst / dmconst).to(pint.dmu)
 
 
-def parse_time(input, scale="tdb", precision=9):
+def parse_time(
+    input: Union[float, Time, u.Quantity, int, str],
+    scale: str = "tdb",
+    precision: int = 9,
+) -> Time:
     """Parse an :class:`astropy.time.Time` object from a range of input types
 
     Parameters
@@ -2543,7 +2850,7 @@ def parse_time(input, scale="tdb", precision=9):
         raise TypeError(f"Do not know how to parse times from {type(input)}")
 
 
-def get_unit(parname):
+def get_unit(parname: str) -> u.Unit:
     """Return the unit associated with a parameter
 
     Handles normal parameters, along with aliases and indexed parameters
@@ -2663,7 +2970,7 @@ def bayesian_information_criterion(
     """Compute the Bayesian information criterion (BIC). The BIC is used for comparing different
     models for the given dataset.
 
-    Given a model with best-fit parameters, the AIC is defined as
+    Given a model with best-fit parameters, the BIC is defined as
 
         BIC = k*ln(N) - 2*ln(L)
 
@@ -2705,7 +3012,7 @@ def bayesian_information_criterion(
             if "PhaseOffset" in model.components
             else len(model.free_params) + 1
         )
-        lnN = len(toas)
+        lnN = np.log(len(toas))
         lnL = Residuals(toas, model).lnlikelihood()
         return k * lnN - 2 * lnL
     else:
@@ -2714,7 +3021,9 @@ def bayesian_information_criterion(
         )
 
 
-def sherman_morrison_dot(Ndiag, v, w, x, y):
+def sherman_morrison_dot(
+    Ndiag: np.ndarray, v: np.ndarray, w: float, x: np.ndarray, y: np.ndarray
+) -> Tuple[float, float]:
     """
     Compute an inner product of the form
         (x| C^-1 |y)
@@ -2762,7 +3071,9 @@ def sherman_morrison_dot(Ndiag, v, w, x, y):
     return result, logdet_C
 
 
-def woodbury_dot(Ndiag, U, Phidiag, x, y):
+def woodbury_dot(
+    Ndiag: np.ndarray, U: np.ndarray, Phidiag: np.ndarray, x: np.ndarray, y: np.ndarray
+) -> Tuple[float, float]:
     """
     Compute an inner product of the form
         (x| C^-1 |y)
@@ -2783,7 +3094,7 @@ def woodbury_dot(Ndiag, U, Phidiag, x, y):
         Diagonal elements of the diagonal matrix N
     U: array-like
         A matrix that represents a rank-n update to N
-    Phidiag: float
+    Phidiag: array-like
         Weights associated with the rank-n update
     x: array-like
         Vector 1 for the inner product
@@ -2808,19 +3119,22 @@ def woodbury_dot(Ndiag, U, Phidiag, x, y):
 
     logdet_N = np.sum(np.log(Ndiag))
     logdet_Phi = np.sum(np.log(Phidiag))
-    _, logdet_Sigma = np.linalg.slogdet(Sigma)
+    _, logdet_Sigma = np.linalg.slogdet(Sigma.astype(float))
 
     logdet_C = logdet_N + logdet_Phi + logdet_Sigma
 
     return x_Cinv_y, logdet_C
 
 
-def _get_wx2pl_lnlike(model, component_name, ignore_fyr=True):
+def _get_wx2pl_lnlike(
+    model: "pint.models.TimingModel", component_name: str, ignore_fyr: bool = True
+) -> float:
     from pint.models.noise_model import powerlaw
     from pint import DMconst
 
-    assert component_name in ["WaveX", "DMWaveX"]
-    prefix = "WX" if component_name == "WaveX" else "DMWX"
+    assert component_name in {"WaveX", "DMWaveX", "CMWaveX"}
+    prefix_dict = {"WaveX": "WX", "DMWaveX": "DMWX", "CMWaveX": "CMWX"}
+    prefix = prefix_dict[component_name]
 
     idxs = np.array(model.components[component_name].get_indices())
 
@@ -2832,7 +3146,7 @@ def _get_wx2pl_lnlike(model, component_name, ignore_fyr=True):
 
     assert np.allclose(
         np.diff(np.diff(fs)), 0
-    ), "[DM]WaveX frequencies must be uniformly spaced."
+    ), "WaveX/DMWaveX/CMWaveX frequencies must be uniformly spaced for this conversion to work."
 
     if ignore_fyr:
         year_mask = np.abs(((fs - fyr) / f0)) > 0.5
@@ -2843,7 +3157,15 @@ def _get_wx2pl_lnlike(model, component_name, ignore_fyr=True):
         )
         f0 = np.min(fs)
 
-    scaling_factor = 1 if component_name == "WaveX" else DMconst / (1400 * u.MHz) ** 2
+    scaling_factor = (
+        1
+        if component_name == "WaveX"
+        else (
+            DMconst / (1400 * u.MHz) ** 2
+            if component_name == "DMWaveX"
+            else DMconst / 1400**model.TNCHROMIDX.value
+        )
+    )
 
     a = np.array(
         [
@@ -2870,28 +3192,32 @@ def _get_wx2pl_lnlike(model, component_name, ignore_fyr=True):
         ]
     )
 
-    def powl_model(params):
+    def powl_model(params: Tuple[float, float]) -> float:
         """Get the powerlaw spectrum for the WaveX frequencies for a given
-        set of parameters. This calls the powerlaw function used by `PLRedNoise`/`PLDMNoise`.
+        set of parameters. This calls the powerlaw function used by `PLRedNoise`/`PLDMNoise`/`PLChromNoise`.
         """
         gamma, log10_A = params
         return (powerlaw(fs, A=10**log10_A, gamma=gamma) * f0) ** 0.5
 
-    def mlnlike(params):
+    def mlnlike(params: Tuple[float, ...]) -> float:
         """Negative of the likelihood function that acts on the
-        `[DM]WaveX` amplitudes."""
+        `[DM/CM]WaveX` amplitudes."""
         sigma = powl_model(params)
-        return 0.5 * np.sum(
-            (a**2 / (sigma**2 + da**2))
-            + (b**2 / (sigma**2 + db**2))
-            + np.log(sigma**2 + da**2)
-            + np.log(sigma**2 + db**2)
+        return 0.5 * float(
+            np.sum(
+                (a**2 / (sigma**2 + da**2))
+                + (b**2 / (sigma**2 + db**2))
+                + np.log(sigma**2 + da**2)
+                + np.log(sigma**2 + db**2)
+            )
         )
 
     return mlnlike
 
 
-def plrednoise_from_wavex(model, ignore_fyr=True):
+def plrednoise_from_wavex(
+    model: "pint.models.TimingModel", ignore_fyr: bool = True
+) -> "pint.models.TimingModel":
     """Convert a `WaveX` representation of red noise to a `PLRedNoise`
     representation. This is done by minimizing a likelihood function
     that acts on the `WaveX` amplitudes over the powerlaw spectral
@@ -2939,7 +3265,9 @@ def plrednoise_from_wavex(model, ignore_fyr=True):
     return model1
 
 
-def pldmnoise_from_dmwavex(model, ignore_fyr=False):
+def pldmnoise_from_dmwavex(
+    model: "pint.models.TimingModel", ignore_fyr: bool = False
+) -> "pint.models.TimingModel":
     """Convert a `DMWaveX` representation of red noise to a `PLDMNoise`
     representation. This is done by minimizing a likelihood function
     that acts on the `DMWaveX` amplitudes over the powerlaw spectral
@@ -2991,7 +3319,66 @@ def pldmnoise_from_dmwavex(model, ignore_fyr=False):
     return model1
 
 
-def find_optimal_nharms(model, toas, component, nharms_max=45):
+def plchromnoise_from_cmwavex(
+    model: "pint.models.TimingModel", ignore_fyr: bool = False
+) -> "pint.models.TimingModel":
+    """Convert a `CMWaveX` representation of red noise to a `PLChromNoise`
+    representation. This is done by minimizing a likelihood function
+    that acts on the `CMWaveX` amplitudes over the powerlaw spectral
+    parameters.
+
+    Parameters
+    ----------
+    model: pint.models.timing_model.TimingModel
+        The timing model with a `CMWaveX` component.
+
+    Returns
+    -------
+    pint.models.timing_model.TimingModel
+        The timing model with a converted `PLChromNoise` component.
+    """
+    from pint.models.noise_model import PLChromNoise
+
+    mlnlike = _get_wx2pl_lnlike(model, "CMWaveX", ignore_fyr=ignore_fyr)
+
+    result = minimize(mlnlike, [4, -13], method="Nelder-Mead")
+    if not result.success:
+        raise ValueError("Log-likelihood maximization failed to converge.")
+
+    gamma_val, log10_A_val = result.x
+
+    hess = Hessian(mlnlike)
+
+    H = hess((gamma_val, log10_A_val))
+    assert np.all(np.linalg.eigvals(H) > 0), "The Hessian is not positive definite!"
+
+    Hinv = np.linalg.pinv(H)
+    assert np.all(
+        np.linalg.eigvals(Hinv) > 0
+    ), "The inverse Hessian is not positive definite!"
+
+    gamma_err, log10_A_err = np.sqrt(np.diag(Hinv))
+
+    tndmc = len(model.components["CMWaveX"].get_indices())
+
+    model1 = deepcopy(model)
+    model1.remove_component("CMWaveX")
+    model1.add_component(PLChromNoise())
+    model1.TNCHROMAMP.value = log10_A_val
+    model1.TNCHROMGAM.value = gamma_val
+    model1.TNCHROMC.value = tndmc
+    model1.TNCHROMAMP.uncertainty_value = log10_A_err
+    model1.TNCHROMGAM.uncertainty_value = gamma_err
+
+    return model1
+
+
+def find_optimal_nharms(
+    model: "pint.models.TimingModel",
+    toas: "pint.toa.TOAs",
+    component: Literal["WaveX", "DMWaveX"],
+    nharms_max: int = 45,
+) -> Tuple[int, np.ndarray]:
     """Find the optimal number of harmonics for `WaveX`/`DMWaveX` using the Akaike Information
     Criterion.
 

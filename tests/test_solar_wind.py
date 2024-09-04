@@ -12,7 +12,6 @@ from astropy.time import Time
 from astropy import units as u
 from pint.models import get_model, get_model_and_toas
 from pint.fitter import Fitter
-from pint.toa import get_TOAs
 from pint.simulation import make_fake_toas_uniform
 from pint.models.solar_wind_dispersion import SolarWindDispersionX
 import pint.utils
@@ -117,6 +116,33 @@ def test_solar_wind_generalmodel_p1():
     model = get_model(StringIO("\n".join([par, "NE_SW 1\nSWM 1\nSWP 1"])))
     with pytest.raises(NotImplementedError):
         toas = make_fake_toas_uniform(54000, 54000 + year, 13, model=model, obs="gbt")
+
+
+def test_swx_frozen():
+    # SWX model with a single segment to match the default model
+    model = get_model(
+        StringIO(
+            "\n".join(
+                [par2, "SWXDM_0001 1\nSWXP_0001 2\nSWXR1_0001 53999\nSWXR2_0001 55000"]
+            )
+        )
+    )
+    assert model.SWXP_0001.frozen is True
+    assert model.SWXDM_0001.frozen is True
+    model = get_model(
+        StringIO(
+            "\n".join(
+                [
+                    par2,
+                    "SWXDM_0001 1\nSWXP_0001 2 1\nSWXR1_0001 53999\nSWXR2_0001 55000",
+                ]
+            )
+        )
+    )
+    assert model.SWXP_0001.frozen is False
+    model.add_swx_range(54000, 54180, swxdm=10, swxp=1.5, frozen=False)
+    assert model.SWXP_0002.frozen is True
+    assert model.SWXDM_0002.frozen is False
 
 
 def test_swx_minmax():
@@ -267,8 +293,8 @@ def test_swfit_swx():
     model3.SWXR1_0001.value = t.get_mjds().min().value
     model3.SWXR2_0001.value = t.get_mjds().max().value
     model3.SWXP_0001.value = 2
-    model3.SWXP_0001.frozen = True
     model3.SWXDM_0001.value = 1e-3
+    model3.SWXDM_0001.frozen = False
 
     f1 = Fitter.auto(t, model1)
     f3 = Fitter.auto(t, model3)
